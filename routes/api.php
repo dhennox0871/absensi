@@ -29,6 +29,10 @@ Route::post('/login', [AuthController::class, 'login']);
 // Route Login Wajah (POST)
 Route::post('/login-face', [AuthController::class, 'loginFace']);
 
+//Kiosk
+    Route::post('/kiosk/scan', [App\Http\Controllers\Api\KioskController::class, 'scanWajah']);
+    Route::post('/kiosk/submit', [App\Http\Controllers\Api\KioskController::class, 'submitAbsensi']);
+    Route::get('/kiosk/today', [App\Http\Controllers\Api\KioskController::class, 'getTodayList']);
 
 Route::middleware('auth:sanctum')->group(function () {
     // Jalur Absensi
