@@ -5,161 +5,163 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Attendance;
+use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
 use Illuminate\Support\Str;
-use Illuminate\Support\Facades\DB;
 
 class AttendanceController extends Controller
 {
     public function store(Request $request)
     {
-        // 1. Validasi Input (Hapus validasi radius)
+        // 1. Validasi Input
         $request->validate([
-            'image'     => 'required|image|max:2048',
+            'image'     => 'required|image|max:5120', // Max 5MB
             'latitude'  => 'required',
             'longitude' => 'required',
         ]);
 
-        $user = $request->user();
-        $now = Carbon::now('Asia/Jakarta');
-        $nowDate = $now->toDateString();
-        $nowMinutes = ($now->hour * 60) + $now->minute; // Konversi jam sekarang ke menit total
-
-        // 2. CEK SPAM (TOLAK JIKA KURANG DARI 5 MENIT DARI SCAN TERAKHIR)
-        $lastLog = Attendance::where('staffid', $user->staffid)
-                    ->where('entrydate', $nowDate)
-                    ->orderBy('createdate', 'desc') // Ambil yang paling baru hari ini
-                    ->first();
-
-        if ($lastLog) {
-            // Hitung selisih menit
-            $lastTime = Carbon::parse($lastLog->createdate);
-            $diff = $now->diffInMinutes($lastTime);
-
-            if ($diff < 5) {
-                return response()->json([
-                    'message' => 'Anda baru saja melakukan scan. Mohon tunggu 5 menit lagi.'
-                ], 400); // 400 Bad Request
-            }
-        }
-
-        // 3. LOGIKA SHIFT OTOMATIS (1, 2, 3, 4)
-        // Ambil Jam Kerja dari Database (HL)
-        $workHour = DB::table('masterworkinghour')->where('workinghourcode', 'HL')->first();
-        
-        // Default values jika DB kosong
-        $jamMasukDB = $workHour->starthour ?? 480;  // 08:00
-        $jamPulangDB = $workHour->endhour ?? 1020;  // 17:00
-        $batasTelat = $workHour->endscaninhour ?? 495; // Batas toleransi telat
-
-        $shiftDetermined = 1; // Default Shift 1
-
-        // A. Logika Berdasarkan Waktu
-        // Jika scan dilakukan SEBELUM jam 11:00 siang (480 + 180 menit toleransi pagi) -> Anggap Shift 1 (Masuk)
-        if ($nowMinutes < ($jamMasukDB + 180)) {
-            $shiftDetermined = 1;
-        }
-        // Jika scan dilakukan SETELAH jam 15:00 sore (1020 - 120 menit) -> Anggap Shift 4 (Pulang)
-        elseif ($nowMinutes > ($jamPulangDB - 120)) {
-            $shiftDetermined = 4;
-        }
-        // Jika di tengah-tengah (Jam Istirahat), cek urutan terakhir
-        else {
-            if ($lastLog) {
-                if ($lastLog->shift == 1) {
-                    $shiftDetermined = 2; // Keluar Istirahat
-                } elseif ($lastLog->shift == 2) {
-                    $shiftDetermined = 3; // Masuk Istirahat
-                } else {
-                    $shiftDetermined = 2; // Default jika bingung
-                }
-            } else {
-                // Belum pernah absen tapi sudah siang? Anggap masuk terlambat (Shift 1)
-                $shiftDetermined = 1;
-            }
-        }
-
-        // 4. LOGIKA STATUS (Hadir / Terlambat)
-        // Kita gunakan kolom status 'F' (Full/Hadir) sebagai default.
-        // Jika Shift 1 DAN melebihi batas scan -> Tetap simpan, tapi nanti di report dianggap telat.
-        $statusAbsen = 'F'; // Default Hadir
-        
-        // Opsional: Jika ingin menandai status di database langsung
-        // if ($shiftDetermined == 1 && $nowMinutes > $batasTelat) {
-        //    $statusAbsen = 'L'; // Late / Terlambat (Jika sistem support kode 'L')
-        // }
-
-        // 5. SIMPAN FOTO
-        $filename = null;
-        if ($request->hasFile('image')) {
-            $path = $request->file('image')->store('public/attendance');
-            $filename = basename($path);
-        }
-
         try {
-            // 6. INSERT DATABASE
-            $attendance = Attendance::create([
-                'staffid'           => $user->staffid,
-                'entrydate'         => $nowDate,
+            $user = $request->user(); // Ambil user yang sedang login di HP
+            
+            // Ambil data detail staff
+            $staff = DB::table('masterstaff')->where('staffid', $user->staffid)->first();
+            if (!$staff) return response()->json(['message' => 'Data staff tidak ditemukan'], 404);
+
+            // =================================================================
+            // LOGIKA PENGECEKAN LOKASI (UPDATED: GUNAKAN freeinteger1)
+            // =================================================================
+
+            // A. Ambil Radius Toleransi dari Setting Admin
+            $setting = DB::table('flexnotesetting')->where('settingtypecode', 'customerinfo2')->first();
+            $maxRadiusMeter = $setting ? ((float)$setting->datadecimal3 * 1000) : 100; // Default 100m
+
+            // B. Cek Penempatan Kerja (freeinteger1), BUKAN areaid (Domisili)
+            // freeinteger1 berisi ID dari tabel masterarea
+            if (!empty($staff->freeinteger1)) {
+                
+                // Ambil koordinat dari Master Area berdasarkan freeinteger1
+                $area = DB::table('masterarea')->where('areaid', $staff->freeinteger1)->first();
+                
+                if ($area) {
+                    // Ambil koordinat target (Kantor/Pabrik/Site)
+                    // Pastikan menggunakan latitude1/longitude1 sesuai database Anda
+                    $targetLat = (float)$area->latitude1; 
+                    $targetLng = (float)$area->longitude1;
+
+                    // Lokasi User Saat Ini
+                    $userLat = (float)$request->latitude;
+                    $userLng = (float)$request->longitude;
+
+                    // Hitung Jarak
+                    $jarak = $this->hitungJarak($userLat, $userLng, $targetLat, $targetLng);
+
+                    if ($jarak > $maxRadiusMeter) {
+                        return response()->json([
+                            'message' => "Gagal Absen! Anda berada di luar area penempatan ($area->description). Jarak: " . round($jarak) . "m (Maks: " . round($maxRadiusMeter) . "m)"
+                        ], 403);
+                    }
+                }
+            } 
+            // Jika freeinteger1 NULL, berarti Staff Mobile/Bebas (Tidak ada batasan radius)
+
+            // =================================================================
+
+            // 3. Cek Spam (Mencegah absen double dalam 1 menit)
+            $now = Carbon::now('Asia/Jakarta');
+            $today = $now->toDateString();
+            
+            $lastLog = Attendance::where('staffid', $staff->staffid)
+                        ->where('entrydate', $today)
+                        ->orderBy('createdate', 'desc')
+                        ->first();
+
+            if ($lastLog && $now->diffInMinutes(Carbon::parse($lastLog->createdate)) < 1) {
+                return response()->json(['message' => 'Anda baru saja absen, tunggu sebentar.'], 400);
+            }
+
+            // 4. Hitung Shift Otomatis
+            $nowMinutes = ($now->hour * 60) + $now->minute;
+            $workHour = DB::table('masterworkinghour')->where('workinghourcode', 'HL')->first();
+            $jamMasukDB = $workHour->starthour ?? 480; 
+            $jamPulangDB = $workHour->endhour ?? 1020; 
+
+            $shiftDetermined = 1;
+            if ($nowMinutes < ($jamMasukDB + 180)) $shiftDetermined = 1; // Masuk
+            elseif ($nowMinutes > ($jamPulangDB - 120)) $shiftDetermined = 4; // Pulang
+            else {
+                if ($lastLog) {
+                    if ($lastLog->shift == 1) $shiftDetermined = 2; // Keluar Istirahat
+                    elseif ($lastLog->shift == 2) $shiftDetermined = 3; // Masuk Istirahat
+                    else $shiftDetermined = 2;
+                } else {
+                    $shiftDetermined = 1; 
+                }
+            }
+
+            // 5. Upload Foto
+            $filename = null;
+            if ($request->hasFile('image')) {
+                $path = $request->file('image')->store('public/attendance');
+                $filename = basename($path);
+            }
+
+            // 6. Simpan ke Database
+            Attendance::create([
+                'staffid'           => $staff->staffid,
+                'entrydate'         => $today,
                 'shour'             => $now->hour,
                 'sminute'           => $now->minute,
                 'ssec'              => $now->second,
-                'status'            => $statusAbsen,
-                'shift'             => $shiftDetermined, // 1, 2, 3, atau 4
-
-                // Simpan Foto & Lokasi
-                'freedescription1'  => $filename,
-                'freedescription2'  => $request->longitude,
-                'freedescription3'  => $request->latitude,
-                
-                // UUID & Audit Trail
+                'status'            => 'F', 
+                'shift'             => $shiftDetermined,
+                'freedescription1'  => $filename,           
+                'freedescription2'  => $request->longitude, 
+                'freedescription3'  => $request->latitude,  
                 'absentransentryno' => (string) Str::uuid(),
-                'createby'          => (string) $user->staffid,
+                
+                'createby'          => $user->staffid, 
                 'createdate'        => $now,
-                'modifyby'          => (string) $user->staffid,
+                'modifyby'          => $user->staffid,
                 'modifydate'        => $now,
             ]);
 
             return response()->json([
-                'message' => 'Absensi Berhasil Disimpan',
-                'shift_detect' => $shiftDetermined,
-                'waktu' => $now->format('H:i')
+                'status' => 'success',
+                'message' => 'Absensi berhasil dicatat',
+                'shift_detect' => $shiftDetermined
             ], 200);
 
         } catch (\Exception $e) {
-            return response()->json([
-                'message' => 'Gagal Simpan Database',
-                'error' => $e->getMessage()
-            ], 500);
+            return response()->json(['message' => 'Server Error: ' . $e->getMessage()], 500);
         }
     }
 
-    // --- FUNGSI HISTORY (TETAP SAMA SEPERTI SEBELUMNYA) ---
+    // --- FUNCTION HISTORY ---
     public function history(Request $request)
     {
         $user = $request->user();
+        $startDate = Carbon::now()->subDays(7)->toDateString();
         
-        // Ambil NIK & Cari User
-        $nik = $user->staffcode; 
-        $staff_asli = DB::table('masterstaff')->where('staffcode', $nik)->first();
-
-        if (!$staff_asli) {
-            return response()->json(['message' => 'Staff tidak ditemukan', 'data' => []], 200);
-        }
-
-        $id_karyawan = $staff_asli->staffid;
-        $seminggu_lalu = Carbon::now()->subDays(7)->startOfDay(); 
-
         $data = DB::table('absentrans')
-                    ->where('staffid', $id_karyawan)
-                    ->where('entrydate', '>=', $seminggu_lalu)
-                    ->orderBy('entrydate', 'desc')
-                    ->orderBy('shour', 'desc')
-                    ->get();
+            ->where('staffid', $user->staffid)
+            ->where('entrydate', '>=', $startDate)
+            ->orderBy('entrydate', 'desc')
+            ->orderBy('shour', 'desc')
+            ->get();
 
-        return response()->json([
-            'message' => 'Sukses',
-            'data' => $data
-        ], 200);
+        return response()->json(['data' => $data]);
+    }
+
+    // Fungsi Rumus Jarak (Haversine Formula)
+    private function hitungJarak($lat1, $lon1, $lat2, $lon2) {
+        $earthRadius = 6371000; 
+        $dLat = deg2rad($lat2 - $lat1);
+        $dLon = deg2rad($lon2 - $lon1);
+        $a = sin($dLat/2) * sin($dLat/2) +
+             cos(deg2rad($lat1)) * cos(deg2rad($lat2)) *
+             sin($dLon/2) * sin($dLon/2);
+        $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+        $distance = $earthRadius * $c;
+        return $distance; 
     }
 }
