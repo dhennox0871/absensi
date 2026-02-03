@@ -4,21 +4,18 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
-// --- IMPORT WAJIB (JANGAN DIHAPUS) ---
-use App\Models\User;                    // Untuk ambil list staff (versi Bapak)
-use Illuminate\Support\Facades\DB;      // Untuk cek database
-use Illuminate\Support\Facades\Storage; // Untuk upload foto
-// -------------------------------------
+// --- IMPORT WAJIB ---
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Carbon\Carbon; // PENTING: Untuk catat waktu update
+// --------------------
 
 class AdminController extends Controller
 {
     // =======================================================================
-    // 1. BAGIAN LIST STAFF (SOLUSI ANTI-BLANK)
+    // 1. LIST STAFF (GET)
     // =======================================================================
-    
-    // Kita buat 2 fungsi dengan nama berbeda tapi isinya sama.
-    // Tujuannya: Agar route 'getAllStaff' ATAU 'getStaffList' sama-sama jalan.
-    
     public function getAllStaff() {
         return $this->internalGetStaffLogic();
     }
@@ -27,11 +24,10 @@ class AdminController extends Controller
         return $this->internalGetStaffLogic();
     }
 
-    // --- LOGIKA ASLI (MODEL USER) ---
     private function internalGetStaffLogic()
     {
         try {
-            // Menggunakan kode asli Bapak (Model User)
+            // Ambil data user, urutkan Admin (1) diatas User (0), lalu nama A-Z
             $users = User::orderBy('staffcategoryid', 'desc') 
                          ->orderBy('name', 'asc')
                          ->get();
@@ -42,26 +38,19 @@ class AdminController extends Controller
             ], 200);
 
         } catch (\Exception $e) {
-            // Jika error, kirim pesan jelas biar ketahuan salahnya dimana
-            return response()->json([
-                'message' => 'Gagal Load Data: ' . $e->getMessage()
-            ], 500);
+            return response()->json(['message' => 'Gagal Load Data: ' . $e->getMessage()], 500);
         }
     }
 
     // =======================================================================
-    // 2. BAGIAN UPDATE ROLE (MODEL USER)
+    // 2. UPDATE ROLE ADMIN (POST)
     // =======================================================================
     public function updateRole(Request $request)
     {
         $request->validate(['id' => 'required']); // staffid
 
-        // Cari di tabel User sesuai permintaan
         $user = User::where('staffid', $request->id)->first();
-
-        if (!$user) {
-            return response()->json(['message' => 'User tidak ditemukan.'], 404);
-        }
+        if (!$user) return response()->json(['message' => 'User tidak ditemukan.'], 404);
 
         $input = $request->input('is_admin');
         
@@ -81,7 +70,7 @@ class AdminController extends Controller
     }
 
     // =======================================================================
-    // 3. BAGIAN UPLOAD WAJAH (FITUR BARU 3 SLOT)
+    // 3. UPLOAD WAJAH (POST)
     // =======================================================================
     public function registerFace(Request $request)
     {
@@ -91,12 +80,8 @@ class AdminController extends Controller
                 'image'    => 'required|image|max:10240', 
             ]);
 
-            // Cari NIK di Masterstaff (Lebih aman untuk urusan file)
             $staff = DB::table('masterstaff')->where('staffid', $request->staff_id)->first();
-            
-            if (!$staff) {
-                return response()->json(['message' => 'Staff ID tidak ditemukan.'], 404);
-            }
+            if (!$staff) return response()->json(['message' => 'Staff ID tidak ditemukan.'], 404);
 
             $nik = $staff->staffcode;
             $targetSlot = 0;
@@ -133,7 +118,7 @@ class AdminController extends Controller
             $path = $request->file('image')->storeAs('public/faces_db', $finalName);
 
             return response()->json([
-                'message' => "Wajah didaftarkan di Slot $targetSlot (Total 3).",
+                'message' => "Wajah didaftarkan di Slot $targetSlot.",
                 'path' => $path,
                 'staff_code' => $nik
             ], 200);
@@ -143,42 +128,60 @@ class AdminController extends Controller
         }
     }
 
-    // --- FUNGSI UPDATE DATABASE WAJAH (DIPANGGIL ADMIN) ---
+    // =======================================================================
+    // 4. UPDATE DATABASE WAJAH AI (GET)
+    // =======================================================================
     public function syncFaceData()
     {
-        // Pastikan hanya Admin yang boleh akses (Opsional: tambahkan middleware di route)
         try {
-            // Path Python
+            // Path Python (Sesuaikan dengan server Bapak)
             $pythonExe = "C:/Users/dhenn/AppData/Local/Programs/Python/Python311/python.exe"; 
-            
-            // Path Script Training
             $scriptPath = base_path('latih_wajah.py');
             
-            if (!file_exists($scriptPath)) {
-                return response()->json(['message' => 'Script latih_wajah.py tidak ditemukan di server.'], 500);
-            }
+            if (!file_exists($scriptPath)) return response()->json(['message' => 'Script latih_wajah.py hilang.'], 500);
 
-            // Eksekusi
             $command = '"' . $pythonExe . '" "' . $scriptPath . '" 2>&1';
             $output = shell_exec($command);
             
-            // Cek apakah output mengandung kata "SUKSES"
             if (strpos($output, 'SUKSES') !== false) {
-                 return response()->json([
-                    'status' => 'success',
-                    'message' => 'Database Wajah Berhasil Diperbarui!',
-                    'detail' => $output
-                ], 200);
+                 return response()->json(['status' => 'success', 'message' => 'AI Updated!', 'detail' => $output], 200);
             } else {
-                return response()->json([
-                    'status' => 'error',
-                    'message' => 'Gagal Update Database.',
-                    'detail' => $output
-                ], 500);
+                return response()->json(['status' => 'error', 'message' => 'Gagal Update AI.', 'detail' => $output], 500);
             }
             
         } catch (\Exception $e) {
             return response()->json(['message' => 'Server Error: ' . $e->getMessage()], 500);
+        }
+    }
+
+    // =======================================================================
+    // 5. UPDATE PENEMPATAN AREA KERJA (POST) - [PINDAHAN DARI STAFF CONTROLLER]
+    // =======================================================================
+    public function updatePlacement(Request $request)
+    {
+        $staffId = $request->input('staffid');
+        $areaId = $request->input('areaid');
+
+        if (!$staffId) return response()->json(['message' => 'Staff ID Required'], 400);
+
+        // Normalisasi null (String "null" -> NULL Database)
+        if ($areaId === 'null' || $areaId === 0 || $areaId === '0' || empty($areaId)) {
+            $areaId = null;
+        }
+
+        try {
+            DB::table('masterstaff')->where('staffid', $staffId)->update([
+                'freeinteger1' => $areaId, // freeinteger1 = Lokasi Kerja
+                'modifydate'   => Carbon::now(),
+                'modifyby'     => 'ADMIN'
+            ]);
+
+            return response()->json([
+                'status' => 'success', 
+                'message' => 'Penempatan Berhasil Diupdate'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
         }
     }
 }

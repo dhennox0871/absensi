@@ -41,6 +41,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/admin/update-role', [AdminController::class, 'updateRole']);
     Route::get('/admin/sync-faces', [AdminController::class, 'syncFaceData']);
     Route::post('/admin/register-face', [AdminController::class, 'registerFace']);
+    // --- PENEMPATAN LOKASI (BARU - PAKE ADMIN CONTROLLER) ---
+    Route::post('/admin/staff/placement', [AdminController::class, 'updatePlacement']);
 
     // Admin Settings
     Route::get('/admin/settings', [SettingsController::class, 'index']);

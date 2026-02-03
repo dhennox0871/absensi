@@ -13,7 +13,7 @@ class AttendanceController extends Controller
 {
     public function store(Request $request)
     {
-        // 1. Validasi Input
+        // 1. Validasi Input GPS & Foto
         $request->validate([
             'image'     => 'required|image|max:5120', // Max 5MB
             'latitude'  => 'required',
@@ -21,48 +21,59 @@ class AttendanceController extends Controller
         ]);
 
         try {
-            $user = $request->user(); // Ambil user yang sedang login di HP
+            $user = $request->user(); // Ambil user yang login
             
             // Ambil data detail staff
             $staff = DB::table('masterstaff')->where('staffid', $user->staffid)->first();
             if (!$staff) return response()->json(['message' => 'Data staff tidak ditemukan'], 404);
 
             // =================================================================
-            // LOGIKA PENGECEKAN LOKASI (UPDATED: GUNAKAN freeinteger1)
+            // LOGIKA PENGECEKAN LOKASI (PENEMPATAN KERJA)
             // =================================================================
 
-            // A. Ambil Radius Toleransi dari Setting Admin
-            $setting = DB::table('flexnotesetting')->where('settingtypecode', 'customerinfo2')->first();
-            $maxRadiusMeter = $setting ? ((float)$setting->datadecimal3 * 1000) : 100; // Default 100m
+            // A. Ambil Radius Toleransi (Table: flexnotesetting, Code: customerinfo2)
+            // Berdasarkan screenshot: datadecimal3 = 7.5 (Asumsi KM, jadi dikali 1000 = 7500 Meter)
+            $setting = DB::table('flexnotesetting')
+                         ->where('settingtypecode', 'customerinfo2') // <--- SUDAH DIPERBAIKI
+                         ->first();
+            
+            // Jika setting tidak ditemukan, default radius 100 meter
+            $maxRadiusMeter = $setting ? ((float)$setting->datadecimal3 ) : 5.0;
 
-            // B. Cek Penempatan Kerja (freeinteger1), BUKAN areaid (Domisili)
-            // freeinteger1 berisi ID dari tabel masterarea
-            if (!empty($staff->freeinteger1)) {
+            // B. Cek Apakah Staff Punya Penempatan? (freeinteger1 tidak null/0)
+            if (!empty($staff->freeinteger1) && $staff->freeinteger1 != 0) {
                 
-                // Ambil koordinat dari Master Area berdasarkan freeinteger1
+                // Ambil Data Master Area dari tabel masterarea
                 $area = DB::table('masterarea')->where('areaid', $staff->freeinteger1)->first();
                 
-                if ($area) {
-                    // Ambil koordinat target (Kantor/Pabrik/Site)
-                    // Pastikan menggunakan latitude1/longitude1 sesuai database Anda
+                // Pastikan Area Ditemukan & Punya Koordinat Valid
+                if ($area && !empty($area->latitude1) && !empty($area->longitude1)) {
+                    
+                    // Koordinat Kantor/Area (Dari Database)
                     $targetLat = (float)$area->latitude1; 
                     $targetLng = (float)$area->longitude1;
 
-                    // Lokasi User Saat Ini
+                    // Koordinat Staff Saat Ini (Dari GPS HP)
                     $userLat = (float)$request->latitude;
                     $userLng = (float)$request->longitude;
 
-                    // Hitung Jarak
+                    // Hitung Jarak (Meter)
                     $jarak = $this->hitungJarak($userLat, $userLng, $targetLat, $targetLng);
 
+                    // VALIDASI JARAK
+                    // Jika jarak user > radius yang diizinkan => TOLAK
                     if ($jarak > $maxRadiusMeter) {
                         return response()->json([
-                            'message' => "Gagal Absen! Anda berada di luar area penempatan ($area->description). Jarak: " . round($jarak) . "m (Maks: " . round($maxRadiusMeter) . "m)"
+                            'status' => 'error', 
+                            'message' => "Gagal Absen! Posisi Anda diluar radius area penempatan.",
+                            'detail' => "Lokasi: $area->description. Jarak Anda: " . round($jarak) . "m (Maks: " . round($maxRadiusMeter) . "m)"
                         ], 403);
                     }
                 }
+                // Jika Area ditemukan tapi koordinatnya NULL di database, sistem akan meloloskan (Bypass)
+                // karena tidak bisa dihitung jaraknya.
             } 
-            // Jika freeinteger1 NULL, berarti Staff Mobile/Bebas (Tidak ada batasan radius)
+            // NOTE: Jika freeinteger1 NULL, kode di atas dilewati (Bebas Absen Dimana Saja / Mobile)
 
             // =================================================================
 
@@ -76,36 +87,43 @@ class AttendanceController extends Controller
                         ->first();
 
             if ($lastLog && $now->diffInMinutes(Carbon::parse($lastLog->createdate)) < 1) {
-                return response()->json(['message' => 'Anda baru saja absen, tunggu sebentar.'], 400);
+                return response()->json(['message' => 'Anda baru saja absen, mohon tunggu sebentar.'], 400);
             }
 
-            // 4. Hitung Shift Otomatis
+            // 4. Hitung Shift Otomatis (Masuk/Pulang/Istirahat)
             $nowMinutes = ($now->hour * 60) + $now->minute;
+            
+            // Ambil jam kerja (Default HL)
             $workHour = DB::table('masterworkinghour')->where('workinghourcode', 'HL')->first();
-            $jamMasukDB = $workHour->starthour ?? 480; 
-            $jamPulangDB = $workHour->endhour ?? 1020; 
+            $jamMasukDB = $workHour->starthour ?? 480; // 08:00
+            $jamPulangDB = $workHour->endhour ?? 1020; // 17:00
 
-            $shiftDetermined = 1;
-            if ($nowMinutes < ($jamMasukDB + 180)) $shiftDetermined = 1; // Masuk
-            elseif ($nowMinutes > ($jamPulangDB - 120)) $shiftDetermined = 4; // Pulang
-            else {
+            $shiftDetermined = 1; // Default Masuk
+            
+            // Logika Penentuan Status Absen
+            if ($nowMinutes < ($jamMasukDB + 180)) {
+                $shiftDetermined = 1; // Masuk (Pagi sampai jam 11)
+            } elseif ($nowMinutes > ($jamPulangDB - 120)) {
+                $shiftDetermined = 4; // Pulang (Sore)
+            } else {
+                // Di tengah hari (Istirahat)
                 if ($lastLog) {
                     if ($lastLog->shift == 1) $shiftDetermined = 2; // Keluar Istirahat
                     elseif ($lastLog->shift == 2) $shiftDetermined = 3; // Masuk Istirahat
                     else $shiftDetermined = 2;
                 } else {
-                    $shiftDetermined = 1; 
+                    $shiftDetermined = 1; // Telat banget masuk
                 }
             }
 
-            // 5. Upload Foto
+            // 5. Upload Foto ke Server
             $filename = null;
             if ($request->hasFile('image')) {
                 $path = $request->file('image')->store('public/attendance');
                 $filename = basename($path);
             }
 
-            // 6. Simpan ke Database
+            // 6. Simpan Transaksi Absen ke DB
             Attendance::create([
                 'staffid'           => $staff->staffid,
                 'entrydate'         => $today,
@@ -136,7 +154,7 @@ class AttendanceController extends Controller
         }
     }
 
-    // --- FUNCTION HISTORY ---
+    // --- FUNCTION HISTORY (List Absensi 7 Hari Terakhir) ---
     public function history(Request $request)
     {
         $user = $request->user();
@@ -152,9 +170,9 @@ class AttendanceController extends Controller
         return response()->json(['data' => $data]);
     }
 
-    // Fungsi Rumus Jarak (Haversine Formula)
+    // --- RUMUS JARAK (HAVERSINE FORMULA) ---
     private function hitungJarak($lat1, $lon1, $lat2, $lon2) {
-        $earthRadius = 6371000; 
+        $earthRadius = 6371000; // Radius bumi dalam meter
         $dLat = deg2rad($lat2 - $lat1);
         $dLon = deg2rad($lon2 - $lon1);
         $a = sin($dLat/2) * sin($dLat/2) +
@@ -162,6 +180,6 @@ class AttendanceController extends Controller
              sin($dLon/2) * sin($dLon/2);
         $c = 2 * atan2(sqrt($a), sqrt(1-$a));
         $distance = $earthRadius * $c;
-        return $distance; 
+        return $distance; // Hasil dalam Meter
     }
 }
