@@ -20,4 +20,10 @@ class StaffPosition extends Model
 
     // Izinkan semua kolom diisi
     protected $guarded = [];
+
+    protected $fillable = [
+        'staffpositioncode',
+        'description',
+        'blocked'
+    ];
 }

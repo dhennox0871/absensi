@@ -31,6 +31,7 @@ Route::get('/kiosk/today', [KioskController::class, 'getTodayList']);
 
 // --- 2. ROUTE PROTECTED (WAJIB LOGIN / ADA TOKEN) ---
 Route::middleware('auth:sanctum')->group(function () {
+    Route::post('/change-password', [AuthController::class, 'changePassword']);
     
     // A. Jalur Absensi Staff (HP Pribadi)
     Route::post('/attendance', [AttendanceController::class, 'store']);

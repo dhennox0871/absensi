@@ -190,4 +190,33 @@ class AuthController extends Controller
             return response()->json(['message' => 'Server Error: ' . $e->getMessage()], 500);
         }
     }
+
+    public function changePassword(Request $request)
+    {
+        $request->validate([
+            'old_password' => 'required',
+            'new_password' => 'required|min:6|confirmed', // butuh field new_password_confirmation
+        ]);
+
+        $user = $request->user();
+
+        // Cek Password Lama (Hati-hati: User Bapak passwordnya plain text / hash?)
+        // JIKA HASH (Bcrypt):
+        /*
+        if (!Hash::check($request->old_password, $user->password)) {
+            return response()->json(['message' => 'Password lama salah'], 400);
+        }
+        $user->password = Hash::make($request->new_password);
+        */
+
+        // JIKA PLAIN TEXT (Sesuai screenshot staff Bapak):
+        if ($request->old_password !== $user->password) {
+             return response()->json(['message' => 'Password lama salah'], 400);
+        }
+        $user->password = $request->new_password; 
+        
+        $user->save();
+
+        return response()->json(['message' => 'Password berhasil diubah']);
+    }
 }

@@ -154,18 +154,37 @@ class AttendanceController extends Controller
         }
     }
 
-    // --- FUNCTION HISTORY (List Absensi 7 Hari Terakhir) ---
+    // --- FUNCTION HISTORY DINAMIS ---
     public function history(Request $request)
     {
         $user = $request->user();
-        $startDate = Carbon::now()->subDays(7)->toDateString();
         
-        $data = DB::table('absentrans')
-            ->where('staffid', $user->staffid)
-            ->where('entrydate', '>=', $startDate)
-            ->orderBy('entrydate', 'desc')
-            ->orderBy('shour', 'desc')
-            ->get();
+        // Ambil parameter 'type' dari URL (default 'week')
+        $type = $request->query('type', 'week'); 
+
+        $query = DB::table('absentrans')
+                    ->where('staffid', $user->staffid);
+
+        // FILTER BERDASARKAN TIPE
+        if ($type == 'month') {
+            // PROFILE PAGE: Data Bulan Ini (Tgl 1 s/d Sekarang)
+            $startDate = Carbon::now()->startOfMonth()->toDateString();
+            $query->where('entrydate', '>=', $startDate);
+        } 
+        elseif ($type == 'all') {
+            // HISTORY PAGE: Semua Data (Dibatasi 1 tahun agar tidak berat)
+            $startDate = Carbon::now()->subYear()->toDateString();
+            $query->where('entrydate', '>=', $startDate);
+        } 
+        else {
+            // HOME VIEW: Data 7 Hari Terakhir
+            $startDate = Carbon::now()->subDays(7)->toDateString();
+            $query->where('entrydate', '>=', $startDate);
+        }
+
+        $data = $query->orderBy('entrydate', 'desc')
+                      ->orderBy('shour', 'desc')
+                      ->get();
 
         return response()->json(['data' => $data]);
     }
