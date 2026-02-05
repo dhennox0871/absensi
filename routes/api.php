@@ -28,6 +28,7 @@ Route::post('/kiosk/scan', [KioskController::class, 'scanWajah']);
 Route::post('/kiosk/submit', [KioskController::class, 'submitAbsensi']);
 Route::get('/kiosk/today', [KioskController::class, 'getTodayList']);
 
+Route::get('/admin/dashboard-test', [AdminController::class, 'dashboardStats']);
 
 // --- 2. ROUTE PROTECTED (WAJIB LOGIN / ADA TOKEN) ---
 Route::middleware('auth:sanctum')->group(function () {
@@ -44,6 +45,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/admin/register-face', [AdminController::class, 'registerFace']);
     // --- PENEMPATAN LOKASI (BARU - PAKE ADMIN CONTROLLER) ---
     Route::post('/admin/staff/placement', [AdminController::class, 'updatePlacement']);
+    Route::get('/admin/dashboard', [AdminController::class, 'dashboardStats']);
 
     // Admin Settings
     Route::get('/admin/settings', [SettingsController::class, 'index']);

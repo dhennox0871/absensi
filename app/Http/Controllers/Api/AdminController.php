@@ -184,4 +184,76 @@ class AdminController extends Controller
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
         }
     }
+
+    // --- DASHBOARD ADMIN (STATISTIK & AKTIVITAS HARI INI) ---
+    public function dashboardStats()
+    {
+        // Format tanggal standar YYYY-MM-DD
+        $today = Carbon::now()->format('Y-m-d');
+
+        try {
+            // 1. Hitung Total Staff
+            $totalStaff = DB::table('masterstaff')->count();
+            
+            // 2. Hitung Hadir (Shift 1)
+            $hadir = DB::table('absentrans')
+                        ->where('entrydate', '>=', $today . ' 00:00:00')
+                        ->where('entrydate', '<=', $today . ' 23:59:59')
+                        ->where('shift', 1) 
+                        ->distinct('staffid') 
+                        ->count('staffid');
+
+            // 3. Hitung Ijin/Sakit
+            $ijin = DB::table('absentrans')
+                    ->where('entrydate', '>=', $today . ' 00:00:00')
+                    ->where('entrydate', '<=', $today . ' 23:59:59')
+                    ->whereIn('status', ['I', 'S'])
+                    ->distinct('staffid')
+                    ->count('staffid');
+
+            // 4. Hitung Alpha
+            $alpha = $totalStaff - ($hadir + $ijin); 
+            if ($alpha < 0) $alpha = 0; 
+
+            // 5. List Aktivitas
+            $activities = DB::table('absentrans')
+                            ->join('masterstaff', 'absentrans.staffid', '=', 'masterstaff.staffid')
+                            ->where('absentrans.entrydate', '>=', $today . ' 00:00:00')
+                            ->where('absentrans.entrydate', '<=', $today . ' 23:59:59')
+                            ->select(
+                                'masterstaff.name', 
+                                // 'masterstaff.photo_url', <--- INI SAYA HAPUS KARENA TIDAK ADA DI DB
+                                
+                                // Ambil kolom spesifik biar tidak crash
+                                'absentrans.shour',
+                                'absentrans.sminute',
+                                'absentrans.shift',
+                                'absentrans.status',
+                                'absentrans.freedescription1',
+                                'absentrans.freedescription2',
+                                'absentrans.freedescription3'
+                            )
+                            ->orderBy('absentrans.createdate', 'desc')
+                            ->get();
+
+            return response()->json([
+                'status' => 'success',
+                'stats' => [
+                    'total_staff' => $totalStaff,
+                    'hadir' => $hadir,
+                    'ijin' => $ijin,
+                    'alpha' => $alpha 
+                ],
+                'activities' => $activities
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error', 
+                'message' => 'CRITICAL ERROR: ' . $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ], 200); 
+        }
+    }
 }
